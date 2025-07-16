@@ -1,0 +1,7 @@
+base   pagecss
+author dWiGhT Mulcahy
+email  
+date   2025-07-15
+name   Page CSS Plugin
+desc   Allows custom per-page CSS injection using <css> blocks. Auto-supports Wrap plugin classes.
+url    https://www.dokuwiki.org/plugin:pagecss
