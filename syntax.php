@@ -24,7 +24,7 @@ class syntax_plugin_pagecss extends DokuWiki_Syntax_Plugin {
         return array(
             'author' => 'dWiGhT Mulcahy',
             'email'  => 'support@example.com',
-            'date'   => '2025-07-15',
+            'date'   => '2025-07-17',
             'name'   => 'Page CSS Plugin',
             'desc'   => 'Allows custom per-page CSS injection using <css> blocks. Auto-supports Wrap plugin classes.',
             'url'    => 'https://www.dokuwiki.org/plugin:pagecss'
@@ -67,11 +67,38 @@ class syntax_plugin_pagecss extends DokuWiki_Syntax_Plugin {
     }
 
     /**
+     * Sanitize CSS content to prevent XSS
+     */
+    private function sanitize_css($css) {
+        // Remove tag-breaking attacks
+        $css = str_ireplace('</style>', '', $css);
+
+        // Strip JavaScript URIs
+        $css = preg_replace('/url\s*\(\s*[\'"]?\s*javascript:/i', 'url("about:blank', $css);
+
+        // Remove CSS expressions (used in old IE)
+        $css = preg_replace('/expression\s*\(/i', '', $css);
+
+        // Strip script tags
+        $css = preg_replace('/<\s*script[^>]*?>.*?<\s*\/\s*script\s*>/is', '', $css);
+
+        return $css;
+    }
+
+    /**
      * Handle the CSS content between <css> tags
      */
     public function handle($match, $state, $pos, Doku_Handler $handler) {
         if ($state === DOKU_LEXER_UNMATCHED) {
+            // Check group permission from plugin config
+            $allowedGroup = trim($this->getConf('allowgroup'));
+            if (!auth_ismember($allowedGroup)) {
+                msg("You are not allowed to use <css> blocks (requires group {$allowedGroup}).", -1);
+                return false;
+            }
+
             $css = trim($match);
+            $css = $this->sanitize_css($css);
 
             // Auto-add .wrap_ versions for WRAP plugin compatibility
             preg_match_all('/\\.(\\w[\\w\\-]*)/', $css, $matches);
@@ -101,11 +128,15 @@ class syntax_plugin_pagecss extends DokuWiki_Syntax_Plugin {
      */
     public function inject_css(Doku_Event $event, $param) {
         if (empty(self::$css)) return;
+
         $event->data['style'][] = array(
             'type' => 'text/css',
             'media' => 'screen',
             '_data' => self::$css
         );
+
+        // Clear CSS after injection to avoid bleed between pages
+        self::$css = '';
     }
 
     /**
