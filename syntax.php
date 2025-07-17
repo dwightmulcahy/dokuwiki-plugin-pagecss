@@ -86,14 +86,41 @@ class syntax_plugin_pagecss extends DokuWiki_Syntax_Plugin {
     }
 
     /**
+     * Get the current logged-in username
+     */
+    protected function getUserName() {
+        global $USERINFO;
+        return isset($USERINFO['name']) ? $USERINFO['name'] : '';
+    }
+
+    /**
      * Handle the CSS content between <css> tags
      */
     public function handle($match, $state, $pos, Doku_Handler $handler) {
         if ($state === DOKU_LEXER_UNMATCHED) {
-            // Check group permission from plugin config
-            $allowedGroup = trim($this->getConf('allowgroup'));
-            if (!auth_ismember($allowedGroup)) {
-                msg("You are not allowed to use <css> blocks (requires group {$allowedGroup}).", -1);
+            // Enforce access control for multiple groups/users
+            $allowed = false;
+            $allowedGroups = array_map('trim', explode(',', $this->getConf('allowgroup')));
+            foreach ($allowedGroups as $allowedGroupOrUser) {
+                if ($allowedGroupOrUser === '') continue;
+
+                if ($allowedGroupOrUser[0] === '@') {
+                    // Group check
+                    if (auth_ismember($allowedGroupOrUser)) {
+                        $allowed = true;
+                        break;
+                    }
+                } else {
+                    // Username check
+                    if ($this->getUserName() === $allowedGroupOrUser) {
+                        $allowed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!$allowed) {
+                msg("You are not allowed to use <css> blocks. Requires membership in one of: " . implode(', ', $allowedGroups), -1);
                 return false;
             }
 
