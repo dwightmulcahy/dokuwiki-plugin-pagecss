@@ -1,0 +1,2 @@
+<?php
+$conf['allowgroup'] = '@admin';
