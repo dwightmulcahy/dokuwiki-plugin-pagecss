@@ -101,11 +101,15 @@ class syntax_plugin_pagecss extends DokuWiki_Syntax_Plugin {
      */
     public function inject_css(Doku_Event $event, $param) {
         if (empty(self::$css)) return;
+
         $event->data['style'][] = array(
             'type' => 'text/css',
             'media' => 'screen',
             '_data' => self::$css
         );
+
+        // Clear CSS after injection to avoid bleed between pages
+        self::$css = '';
     }
 
     /**
