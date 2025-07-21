@@ -31,6 +31,10 @@ class syntax_plugin_pagecss extends DokuWiki_Syntax_Plugin {
         );
     }
 
+    public function getCacheMode($mode, &$renderer) {
+        return -1; // This tells DokuWiki "do not cache this plugin"
+    }
+
     /**
      * Declares the syntax type
      */
