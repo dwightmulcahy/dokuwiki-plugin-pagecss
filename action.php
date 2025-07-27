@@ -1,50 +1,234 @@
 <?php
+/**
+ * DokuWiki Plugin: pagecss
+ *
+ * This plugin allows DokuWiki users to embed custom CSS directly within their
+ * wiki pages using `<pagecss>...</pagecss>` blocks. The CSS defined within
+ * these blocks is then extracted, processed, and injected into the `<head>`
+ * section of the generated HTML page.
+ *
+ * It also provides a feature to automatically wrap CSS rules for classes
+ * found within the `<pagecss>` block (e.g., `.myclass { ... }`) with a
+ * `.wrap_myclass { ... }` equivalent. This is useful for styling elements
+ * that are automatically wrapped by DokuWiki's `.wrap` classes.
+ *
+ * Author: dWiGhT Mulcahy
+ * Date: 2023-10-27 (or original creation date)
+ *
+ * @license GPL 2 (http://www.gnu.org/licenses/gpl.html)
+ */
+
+// Import necessary DokuWiki extension classes
 use dokuwiki\Extension\ActionPlugin;
 use dokuwiki\Extension\EventHandler;
 use dokuwiki\Extension\Event;
 
-class action_plugin_pagecss extends ActionPlugin {
+// --- Tidy CSS Integration ---
+require_once __DIR__ . '/vendor/csstidy-2.2.1/class.csstidy.php';
+// --- End Tidy CSS Integration ---
 
-    public function register(EventHandler $controller) {
+/**
+ * Class action_plugin_pagecss
+ *
+ * This class extends DokuWiki's ActionPlugin to hook into specific DokuWiki
+ * events for processing and injecting custom page-specific CSS.
+ */
+class action_plugin_pagecss extends ActionPlugin
+{
+
+    /**
+     * Store the HTMLPurifier instance. We initialize it once to avoid repeated overhead.
+     * @var HTMLPurifier|null
+     */
+    private $purifier = null;
+
+    /**
+     * Registers the plugin's hooks with the DokuWiki event handler.
+     *
+     * This method is called by DokuWiki during plugin initialization.
+     * It sets up which DokuWiki events this plugin will listen for and
+     * which methods will handle those events.
+     *
+     * @param EventHandler $controller The DokuWiki event handler instance.
+     */
+    public function register(EventHandler $controller)
+    {
+        // Register a hook to inject custom CSS into the HTML header.
+        // 'TPL_METAHEADER_OUTPUT' is triggered just before the <head> section is closed.
+        // 'BEFORE' ensures our CSS is added before other elements that might rely on it.
+        // '$this' refers to the current plugin instance.
+        // 'inject_css' is the method that will be called when this event fires.
         $controller->register_hook('TPL_METAHEADER_OUTPUT', 'BEFORE', $this, 'inject_css');
+
+        // Register a hook to handle metadata caching and extraction of CSS.
+        // 'PARSER_CACHE_USE' is triggered before DokuWiki attempts to use its parser cache.
+        // 'BEFORE' allows us to modify the metadata before the page is rendered or cached.
+        // 'handle_metadata' is the method that will be called.
         $controller->register_hook('PARSER_CACHE_USE', 'BEFORE', $this, 'handle_metadata');
     }
 
-    public function handle_metadata(\Doku_Event $event) {
+    /**
+     * Sanitize user-provided CSS using CSSTidy and additional filtering.
+     *
+     * @param string $css_input Raw user CSS inside <pagecss> block
+     * @return string Cleaned, safe CSS or an empty string if invalid
+     */
+    private function sanitizeCSS($css) {
+        dbglog("pagecss: raw CSS input:\n$css", 2);
+
+        // Bail if too many CSS blocks to prevent abuse
+        if (substr_count($css, '{') > 100) {
+            dbglog("pagecss: too many CSS blocks (>100)", 2);
+            return '';
+        }
+
+        // Initialize CSSTidy
+        $tidy = new csstidy();
+        $tidy->set_cfg('remove_bslash', true);
+        $tidy->set_cfg('compress_colors', true);
+        $tidy->set_cfg('compress_font-weight', true);
+        $tidy->set_cfg('lowercase_s', true);
+        $tidy->set_cfg('optimise_shorthands', 1);
+
+        $tidy->parse($css);
+        $tidy_css = $tidy->print->plain();
+
+        dbglog("pagecss: after CSSTidy:\n$tidy_css", 2);
+
+        // Bail if CSS is suspiciously long
+        $length = strlen($tidy_css);
+        if ($length > 5000) {
+            dbglog("pagecss: CSS too long after tidy ($length bytes)", 2);
+            return '';
+        }
+
+        // Reject suspicious !important overuse (more than 5 occurrences)
+        $important_count = substr_count($tidy_css, '!important');
+        if ($important_count > 5) {
+            dbglog("pagecss: excessive use of !important ($important_count times), rejecting CSS", 2);
+            return '';
+        }
+
+        // Reject dangerous properties like behavior and -moz-binding
+        if (preg_match('/\b(behavior|-moz-binding)\s*:/i', $tidy_css)) {
+            dbglog("pagecss: found disallowed properties (behavior or -moz-binding), rejecting CSS", 2);
+            return '';
+        }
+
+        // Harden further with regex filters
+        $tidy_css = preg_replace('/expression\s*\(.*?\)/i', '', $tidy_css);                   // Remove expression()
+        $tidy_css = preg_replace('/@import/i', '', $tidy_css);                                // Strip @import
+        $tidy_css = preg_replace('/url\s*\(\s*[\'"]?\s*(javascript|data):/i', 'url(', $tidy_css); // Prevent JS/data: URLs
+        $tidy_css = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $tidy_css);        // Remove control chars
+
+        dbglog("pagecss: after regex sanitization:\n$tidy_css", 2);
+
+        // Reject empty or too short CSS after cleanup (less than 10 chars)
+        $trimmed = trim($tidy_css);
+        if (strlen($trimmed) < 10) {
+            dbglog("pagecss: sanitized CSS too short or empty after cleanup", 2);
+            return '';
+        }
+
+        dbglog("pagecss: final sanitized CSS length: " . strlen($trimmed), 2);
+
+        return $trimmed;
+    }
+
+    /**
+     * Extracts CSS content from `<pagecss>...</pagecss>` blocks within a DokuWiki page.
+     *
+     * This method is triggered by the 'PARSER_CACHE_USE' event. It reads the raw
+     * content of the current wiki page, finds all `<pagecss>` blocks, and combines
+     * their content, and stores it in the page's metadata. It also generates
+     * `.wrap_classname` rules for any classes found in the embedded CSS.
+     *
+     * @param \Doku_Event $event The DokuWiki event object, containing page data.
+     */
+    public function handle_metadata(\Doku_Event $event)
+    {
         global $ID;
-        $text = rawWiki($ID);  // Use raw page content instead of description
+
+        $id = cleanID($ID);
+        $text = rawWiki($id);
 
         preg_match_all('/<pagecss>(.*?)<\/pagecss>/s', $text, $matches);
+
         if (!empty($matches[1])) {
-            $styles = implode(" ", array_map('trim', $matches[1]));
-            if ($styles) {
-                preg_match_all('/\.([a-zA-Z0-9_-]+)\s*\{[^}]*\}/', $styles, $class_matches);
+            $styles_raw = implode(" ", array_map('trim', $matches[1]));
+
+            if ($styles_raw) {
+                $sanitized_css = $this->sanitizeCSS($styles_raw);
+
+                if (!$sanitized_css) {
+                    dbglog("pagecss: CSS sanitized to empty for $ID", 2);
+                    p_set_metadata($id, ['pagecss' => ['styles' => '']]);
+                    return;
+                }
+
+                dbglog("pagecss: sanitized CSS ready for $ID", 2);
+
                 $extra = '';
+                preg_match_all('/\.([a-zA-Z0-9_-]+)\s*\{[^}]*\}/', $sanitized_css, $class_matches);
+
+                if (!empty($class_matches[1])) {
+                    dbglog("pagecss: found class selectors: " . implode(', ', $class_matches[1]), 2);
+                }
+
                 foreach ($class_matches[1] as $classname) {
                     $pattern = '/\.' . preg_quote($classname, '/') . '\s*\{([^}]*)\}/';
-                    if (preg_match($pattern, $styles, $style_block)) {
-                        $extra .= ".wrap_$classname {{$style_block[1]}}\n";
+                    if (preg_match($pattern, $sanitized_css, $style_block)) {
+                        $css_properties = $style_block[1];
+                        if (strpos($css_properties, '{') === false && strpos($css_properties, '}') === false) {
+                            $extra .= ".wrap_$classname {{$css_properties}}\n";
+                        }
                     }
                 }
-                $styles .= "\n" . trim($extra);
-                p_set_metadata($ID, ['pagecss' => ['styles' => $styles]]);
+
+                $styles = $sanitized_css . "\n" . trim($extra);
+                $styles = str_replace('</', '<\/', $styles);
+
+                p_set_metadata($id, ['pagecss' => ['styles' => $styles]]);
+                dbglog("pagecss: styles stored in metadata for $id", 2);
                 return;
             }
         }
 
-        p_set_metadata($ID, ['pagecss' => ['styles' => '']]);
+        // Clear styles if none found
+        p_set_metadata($id, ['pagecss' => ['styles' => '']]);
+        dbglog("pagecss: no <pagecss> blocks found, clearing styles for $id", 2);
     }
 
-    public function inject_css(Doku_Event $event) {
-        global $ID;
-        $data = p_get_metadata($ID, 'pagecss');
-        $styles = $data['styles'] ?? '';
+    /**
+     * Injects the extracted CSS into the HTML `<head>` section of the DokuWiki page.
+     *
+     * This method is triggered by the 'TPL_METAHEADER_OUTPUT' event. It retrieves
+     * the stored CSS from the page's metadata and adds it to the event data,
+     * which DokuWiki then uses to build the `<head>` section.
+     *
+     * @param Doku_Event $event The DokuWiki event object, specifically for metaheader output.
+     */
+    public function inject_css(\Doku_Event $event)
+    {
+        global $ID; // Global variable holding the current DokuWiki page ID.
 
+        // Sanitize the page ID.
+        $id = cleanID($ID);
+
+        // Retrieve the 'pagecss' metadata for the current page.
+        $data = p_get_metadata($id, 'pagecss');
+        // Extract the 'styles' content from the metadata, defaulting to an empty string if not set.
+        $styles = isset($data['styles']) ? $data['styles'] : '';
+
+        // Check if there are valid styles to inject and ensure it's a string.
         if ($styles && is_string($styles)) {
+            // Add the custom CSS to the event's 'style' array.
+            // DokuWiki's template system will then automatically render this
+            // as a <style> block within the HTML <head>.
             $event->data['style'][] = [
-                'type' => 'text/css',
-                'media' => 'screen',
-                '_data' => $styles,
+                'type' => 'text/css', // Specifies the content type.
+                'media' => 'screen',  // Specifies the media type for the CSS (e.g., 'screen', 'print').
+                '_data' => $styles,   // The actual CSS content.
             ];
         }
     }
