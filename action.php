@@ -13,6 +13,7 @@
  * that are automatically wrapped by DokuWiki's `.wrap` classes.
  *
  * Author: dWiGhT Mulcahy
+
  * Date: 2023-10-27 (or original creation date)
  *
  * @license GPL 2 (http://www.gnu.org/licenses/gpl.html)
@@ -53,6 +54,7 @@ class action_plugin_pagecss extends ActionPlugin
      */
     public function register(EventHandler $controller)
     {
+
         // Register a hook to inject custom CSS into the HTML header.
         // 'TPL_METAHEADER_OUTPUT' is triggered just before the <head> section is closed.
         // 'BEFORE' ensures our CSS is added before other elements that might rely on it.
@@ -152,6 +154,14 @@ class action_plugin_pagecss extends ActionPlugin
         $id = cleanID($ID);
         $text = rawWiki($id);
 
+        // Sanitize the page ID to ensure it's safe for file system operations and metadata.
+        $id = cleanID($ID);
+        // Get the raw content of the current wiki page. This includes all wiki syntax.
+        $text = rawWiki($id);
+
+        // Use a regular expression to find all occurrences of <pagecss>...</pagecss> blocks.
+        // The /s modifier makes the dot (.) match newlines as well, allowing multiline CSS.
+        // The (.*?) captures the content between the tags non-greedily.
         preg_match_all('/<pagecss>(.*?)<\/pagecss>/s', $text, $matches);
 
         if (!empty($matches[1])) {
@@ -176,6 +186,7 @@ class action_plugin_pagecss extends ActionPlugin
                 }
 
                 foreach ($class_matches[1] as $classname) {
+                    // Construct a regex pattern to find the full CSS rule for the current class.
                     $pattern = '/\.' . preg_quote($classname, '/') . '\s*\{([^}]*)\}/';
                     if (preg_match($pattern, $sanitized_css, $style_block)) {
                         $css_properties = $style_block[1];
@@ -232,4 +243,5 @@ class action_plugin_pagecss extends ActionPlugin
             ];
         }
     }
+
 }
