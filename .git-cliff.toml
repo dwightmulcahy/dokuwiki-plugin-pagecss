@@ -1,0 +1,16 @@
+[changelog]
+header = "# Changelog\n\n"
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }} ([`{{ commit.id | truncate(7) }}`]({{ commit.remote }}{{ commit.id }}))
+{% endfor %}
+{% endfor %}
+"""
+footer = "\n_This changelog was automatically generated._"
+trim = true
+tag_pattern = "v[0-9]*"
+
+[git]
+conventional = true
