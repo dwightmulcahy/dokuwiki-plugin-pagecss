@@ -75,66 +75,63 @@ class action_plugin_pagecss extends ActionPlugin
      * @param string $css_input Raw user CSS inside <pagecss> block
      * @return string Cleaned, safe CSS or an empty string if invalid
      */
+    /**
+     * Sanitize user-provided CSS using CSSTidy and additional filtering
+     * to prevent CSS-based XSS and injection attacks.
+     *
+     * @param string $css Raw user CSS inside <pagecss> block
+     * @return string Cleaned, safe CSS or empty string if invalid or dangerous
+     */
     private function sanitizeCSS($css) {
-        dbglog("pagecss: raw CSS input:\n$css", 2);
+        dbglog("pagecss: raw\n$css", 2);
 
-        // Bail if too many CSS blocks to prevent abuse
+        // Bail if too many CSS blocks (basic sanity check)
         if (substr_count($css, '{') > 100) {
-            dbglog("pagecss: too many CSS blocks (>100)", 2);
+            dbglog("pagecss: too many CSS blocks", 2);
             return '';
         }
 
-        // Initialize CSSTidy
+        // Initialize CSSTidy and configure for safe cleanup
         $tidy = new csstidy();
         $tidy->set_cfg('remove_bslash', true);
         $tidy->set_cfg('compress_colors', true);
         $tidy->set_cfg('compress_font-weight', true);
         $tidy->set_cfg('lowercase_s', true);
         $tidy->set_cfg('optimise_shorthands', 1);
-
         $tidy->parse($css);
+
         $tidy_css = $tidy->print->plain();
+        dbglog("pagecss: tidy\n$tidy_css", 2);
 
-        dbglog("pagecss: after CSSTidy:\n$tidy_css", 2);
-
-        // Bail if CSS is suspiciously long
-        $length = strlen($tidy_css);
-        if ($length > 5000) {
-            dbglog("pagecss: CSS too long after tidy ($length bytes)", 2);
+        // Bail if output is suspiciously long
+        if (strlen($tidy_css) > 5000) {
+            dbglog("pagecss: too long after tidy", 2);
             return '';
         }
 
-        // Reject suspicious !important overuse (more than 5 occurrences)
-        $important_count = substr_count($tidy_css, '!important');
-        if ($important_count > 5) {
-            dbglog("pagecss: excessive use of !important ($important_count times), rejecting CSS", 2);
-            return '';
+        // Further harden CSS by blocking dangerous patterns:
+        $patterns = [
+            '/expression\s*\(.*?\)/i', // - CSS expressions (IE-only)
+            '/url\s*\(\s*[\'"]?\s*javascript:/i', // - javascript: URLs in url()
+            '/behavior\s*:/i', // - behavior property (IE)
+            '/-moz-binding\s*:/i', // - -moz-binding property (Firefox)
+            '/url\s*\(\s*[\'"]?\s*data:text\/html/i', // - data:text/html URLs (potential script injection)
+            '/@import/i', // - @import rules
+            '/unicode-range/i', // - unicode-range declarations (can hide obfuscated code)
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $tidy_css)) {
+                dbglog("pagecss: blocked dangerous CSS pattern: $pattern", 2);
+                return ''; // Reject entire CSS block if dangerous pattern found
+            }
         }
 
-        // Reject dangerous properties like behavior and -moz-binding
-        if (preg_match('/\b(behavior|-moz-binding)\s*:/i', $tidy_css)) {
-            dbglog("pagecss: found disallowed properties (behavior or -moz-binding), rejecting CSS", 2);
-            return '';
-        }
+        // Remove control characters which may cause issues
+        $tidy_css = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $tidy_css);
 
-        // Harden further with regex filters
-        $tidy_css = preg_replace('/expression\s*\(.*?\)/i', '', $tidy_css);                   // Remove expression()
-        $tidy_css = preg_replace('/@import/i', '', $tidy_css);                                // Strip @import
-        $tidy_css = preg_replace('/url\s*\(\s*[\'"]?\s*(javascript|data):/i', 'url(', $tidy_css); // Prevent JS/data: URLs
-        $tidy_css = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $tidy_css);        // Remove control chars
-
-        dbglog("pagecss: after regex sanitization:\n$tidy_css", 2);
-
-        // Reject empty or too short CSS after cleanup (less than 10 chars)
-        $trimmed = trim($tidy_css);
-        if (strlen($trimmed) < 10) {
-            dbglog("pagecss: sanitized CSS too short or empty after cleanup", 2);
-            return '';
-        }
-
-        dbglog("pagecss: final sanitized CSS length: " . strlen($trimmed), 2);
-
-        return $trimmed;
+        dbglog("pagecss: sanitized\n$tidy_css", 2);
+        return $tidy_css;
     }
 
     /**
