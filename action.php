@@ -13,8 +13,7 @@
  * that are automatically wrapped by DokuWiki's `.wrap` classes.
  *
  * Author: dWiGhT Mulcahy
-
- * Date: 2023-10-27 (or original creation date)
+ * Date: 2025-07-27
  *
  * @license GPL 2 (http://www.gnu.org/licenses/gpl.html)
  */
@@ -34,14 +33,7 @@ require_once __DIR__ . '/vendor/csstidy-2.2.1/class.csstidy.php';
  * This class extends DokuWiki's ActionPlugin to hook into specific DokuWiki
  * events for processing and injecting custom page-specific CSS.
  */
-class action_plugin_pagecss extends ActionPlugin
-{
-
-    /**
-     * Store the HTMLPurifier instance. We initialize it once to avoid repeated overhead.
-     * @var HTMLPurifier|null
-     */
-    private $purifier = null;
+class action_plugin_pagecss extends ActionPlugin {
 
     /**
      * Registers the plugin's hooks with the DokuWiki event handler.
@@ -52,9 +44,7 @@ class action_plugin_pagecss extends ActionPlugin
      *
      * @param EventHandler $controller The DokuWiki event handler instance.
      */
-    public function register(EventHandler $controller)
-    {
-
+    public function register(EventHandler $controller) {
         // Register a hook to inject custom CSS into the HTML header.
         // 'TPL_METAHEADER_OUTPUT' is triggered just before the <head> section is closed.
         // 'BEFORE' ensures our CSS is added before other elements that might rely on it.
@@ -144,8 +134,7 @@ class action_plugin_pagecss extends ActionPlugin
      *
      * @param \Doku_Event $event The DokuWiki event object, containing page data.
      */
-    public function handle_metadata(\Doku_Event $event)
-    {
+    public function handle_metadata(\Doku_Event $event) {
         global $ID;
 
         $id = cleanID($ID);
@@ -216,8 +205,7 @@ class action_plugin_pagecss extends ActionPlugin
      *
      * @param Doku_Event $event The DokuWiki event object, specifically for metaheader output.
      */
-    public function inject_css(\Doku_Event $event)
-    {
+    public function inject_css(Doku_Event $event) {
         global $ID; // Global variable holding the current DokuWiki page ID.
 
         // Sanitize the page ID.
