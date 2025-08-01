@@ -12,8 +12,8 @@
  * `.wrap_myclass { ... }` equivalent. This is useful for styling elements
  * that are automatically wrapped by DokuWiki's `.wrap` classes.
  *
- * Author: Your Name/Entity (or original author if known)
- * Date: 2023-10-27 (or original creation date)
+ * Author: dWiGhT Mulcahy
+ * Date: 2025-07-27
  *
  * @license GPL 2 (http://www.gnu.org/licenses/gpl.html)
  */
@@ -22,6 +22,10 @@
 use dokuwiki\Extension\ActionPlugin;
 use dokuwiki\Extension\EventHandler;
 use dokuwiki\Extension\Event;
+
+// --- Tidy CSS Integration ---
+require_once __DIR__ . '/vendor/csstidy-2.2.1/class.csstidy.php';
+// --- End Tidy CSS Integration ---
 
 /**
  * Class action_plugin_pagecss
@@ -56,17 +60,85 @@ class action_plugin_pagecss extends ActionPlugin {
     }
 
     /**
+     * Sanitize user-provided CSS using CSSTidy and additional filtering.
+     *
+     * @param string $css_input Raw user CSS inside <pagecss> block
+     * @return string Cleaned, safe CSS or an empty string if invalid
+     */
+    /**
+     * Sanitize user-provided CSS using CSSTidy and additional filtering
+     * to prevent CSS-based XSS and injection attacks.
+     *
+     * @param string $css Raw user CSS inside <pagecss> block
+     * @return string Cleaned, safe CSS or empty string if invalid or dangerous
+     */
+    private function sanitizeCSS($css) {
+        dbglog("pagecss: raw\n$css", 2);
+
+        // Bail if too many CSS blocks (basic sanity check)
+        if (substr_count($css, '{') > 100) {
+            dbglog("pagecss: too many CSS blocks", 2);
+            return '';
+        }
+
+        // Initialize CSSTidy and configure for safe cleanup
+        $tidy = new csstidy();
+        $tidy->set_cfg('remove_bslash', true);
+        $tidy->set_cfg('compress_colors', true);
+        $tidy->set_cfg('compress_font-weight', true);
+        $tidy->set_cfg('lowercase_s', true);
+        $tidy->set_cfg('optimise_shorthands', 1);
+        $tidy->parse($css);
+
+        $tidy_css = $tidy->print->plain();
+        dbglog("pagecss: tidy\n$tidy_css", 2);
+
+        // Bail if output is suspiciously long
+        if (strlen($tidy_css) > 5000) {
+            dbglog("pagecss: too long after tidy", 2);
+            return '';
+        }
+
+        // Further harden CSS by blocking dangerous patterns:
+        $patterns = [
+            '/expression\s*\(.*?\)/i', // - CSS expressions (IE-only)
+            '/url\s*\(\s*[\'"]?\s*javascript:/i', // - javascript: URLs in url()
+            '/behavior\s*:/i', // - behavior property (IE)
+            '/-moz-binding\s*:/i', // - -moz-binding property (Firefox)
+            '/url\s*\(\s*[\'"]?\s*data:text\/html/i', // - data:text/html URLs (potential script injection)
+            '/@import/i', // - @import rules
+            '/unicode-range/i', // - unicode-range declarations (can hide obfuscated code)
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $tidy_css)) {
+                dbglog("pagecss: blocked dangerous CSS pattern: $pattern", 2);
+                return ''; // Reject entire CSS block if dangerous pattern found
+            }
+        }
+
+        // Remove control characters which may cause issues
+        $tidy_css = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $tidy_css);
+
+        dbglog("pagecss: sanitized\n$tidy_css", 2);
+        return $tidy_css;
+    }
+
+    /**
      * Extracts CSS content from `<pagecss>...</pagecss>` blocks within a DokuWiki page.
      *
      * This method is triggered by the 'PARSER_CACHE_USE' event. It reads the raw
-     * content of the current wiki page, finds all `<pagecss>` blocks, combines
+     * content of the current wiki page, finds all `<pagecss>` blocks, and combines
      * their content, and stores it in the page's metadata. It also generates
      * `.wrap_classname` rules for any classes found in the embedded CSS.
      *
      * @param \Doku_Event $event The DokuWiki event object, containing page data.
      */
     public function handle_metadata(\Doku_Event $event) {
-        global $ID; // Global variable holding the current DokuWiki page ID.
+        global $ID;
+
+        $id = cleanID($ID);
+        $text = rawWiki($id);
 
         // Sanitize the page ID to ensure it's safe for file system operations and metadata.
         $id = cleanID($ID);
@@ -78,64 +150,50 @@ class action_plugin_pagecss extends ActionPlugin {
         // The (.*?) captures the content between the tags non-greedily.
         preg_match_all('/<pagecss>(.*?)<\/pagecss>/s', $text, $matches);
 
-        // Check if any <pagecss> blocks were found.
         if (!empty($matches[1])) {
-            // If blocks are found, combine all captured CSS content into a single string.
-            // trim() is used to remove leading/trailing whitespace from each block.
-            $styles = implode(" ", array_map('trim', $matches[1]));
+            $styles_raw = implode(" ", array_map('trim', $matches[1]));
 
-            // If there's actual CSS content after trimming and combining.
-            if ($styles) {
-                $extra = ''; // Initialize a variable to hold the generated .wrap_classname styles.
+            if ($styles_raw) {
+                $sanitized_css = $this->sanitizeCSS($styles_raw);
 
-                // Find all CSS class selectors (e.g., .myclass) within the extracted styles.
-                // This regex captures the class name (e.g., 'myclass').
-                preg_match_all('/\.([a-zA-Z0-9_-]+)\s*\{[^}]*\}/', $styles, $class_matches);
+                if (!$sanitized_css) {
+                    dbglog("pagecss: CSS sanitized to empty for $ID", 2);
+                    p_set_metadata($id, ['pagecss' => ['styles' => '']]);
+                    return;
+                }
 
-                // Iterate over each found class name.
+                dbglog("pagecss: sanitized CSS ready for $ID", 2);
+
+                $extra = '';
+                preg_match_all('/\.([a-zA-Z0-9_-]+)\s*\{[^}]*\}/', $sanitized_css, $class_matches);
+
+                if (!empty($class_matches[1])) {
+                    dbglog("pagecss: found class selectors: " . implode(', ', $class_matches[1]), 2);
+                }
+
                 foreach ($class_matches[1] as $classname) {
                     // Construct a regex pattern to find the full CSS rule for the current class.
                     $pattern = '/\.' . preg_quote($classname, '/') . '\s*\{([^}]*)\}/';
-                    // Match the specific class rule in the combined styles.
-                    if (preg_match($pattern, $styles, $style_block)) {
-                        // Extract the content of the CSS rule (e.g., "color: red; font-size: 1em;").
+                    if (preg_match($pattern, $sanitized_css, $style_block)) {
                         $css_properties = $style_block[1];
-
-                        // Basic check to avoid malformed or incomplete styles that might contain
-                        // unclosed braces, which could lead to invalid CSS.
                         if (strpos($css_properties, '{') === false && strpos($css_properties, '}') === false) {
-                            // Append the generated .wrap_classname rule to the $extra string.
-                            // DokuWiki often wraps user content in divs with classes like .wrap_someclass.
-                            // This ensures that custom CSS can target these wrapped elements.
                             $extra .= ".wrap_$classname {{$css_properties}}\n";
                         }
                     }
                 }
 
-                // Append the generated .wrap_classname styles to the main $styles string.
-                $styles .= "\n" . trim($extra);
-
-                // IMPORTANT: Prevent premature closing of the <style> tag in the HTML output.
-                // If a user accidentally or maliciously types `</style>` inside `<pagecss>`,
-                // this replaces it with `<\style>` which is still valid CSS but doesn't close the tag.
+                $styles = $sanitized_css . "\n" . trim($extra);
                 $styles = str_replace('</', '<\/', $styles);
 
-                // Store the processed CSS styles in the page's metadata.
-                // This makes the styles available later when the HTML header is generated.
                 p_set_metadata($id, ['pagecss' => ['styles' => $styles]]);
-
-                // Invalidate the DokuWiki parser cache for this page whenever its content changes.
-                // This ensures that if the <pagecss> blocks are modified, the metadata is re-extracted.
-                $event->data['depends']['page'][] = $id;
-
-                return; // Exit the function as styles were found and processed.
+                dbglog("pagecss: styles stored in metadata for $id", 2);
+                return;
             }
         }
 
-        // If no <pagecss> blocks were found or they were empty,
-        // ensure the 'pagecss' metadata entry is reset to an empty string.
-        // This prevents old CSS from being injected if the blocks are removed.
+        // Clear styles if none found
         p_set_metadata($id, ['pagecss' => ['styles' => '']]);
+        dbglog("pagecss: no <pagecss> blocks found, clearing styles for $id", 2);
     }
 
     /**
